@@ -1,5 +1,5 @@
 # Core Protectors — Design Document
-**Version 2.2** | A 16-bit JRPG inspired by Final Fantasy IV/V, built in Godot 4
+**Version 2.3** | A 16-bit JRPG inspired by Final Fantasy IV/V, built in Godot 4
 
 ---
 
@@ -165,7 +165,7 @@ Hollow Wing's Resonance Siphon hooks into BattleManager: on Hollow Wing basic at
 
 ## Island Bosses
 
-Each island boss tests whether the player has mastered that island's element and the party's Mark commands. **Every boss has a non-Mark fallback** so a player missing an unlocked command is never stuck.
+Each island boss tests whether the player has mastered that island's element and the party's Mark commands. **Every boss has a non-Mark fallback** so a player missing an unlocked command is never stuck. All four use a single reusable `IslandBoss.gd` subclass with an @export enum BossType and telegraph signals so players can counter.
 
 ### Earth Boss — The Core-Scarred Wyrm (Deepcrag Chasm)
 Curls into an **Obsidian Shell** periodically: halves physical damage and charges a party-wide quake. Preferred solution: Gardok's Stonebind to tank the quake, or Wind magic to break its posture. **Fallback:** any hero can simply step out of the quake's blast radius (telegraphed by screen shake) or use a basic-attack focus to break the shell's posture over two consecutive hits.
@@ -177,7 +177,90 @@ Summons two Emberkin wisps that buff its attack every turn. Preferred: Sarah's A
 Alternates **Submerged** (untargetable by melee; weak to Wind/Earth shockwaves) and **Tidal Surge** (party-wide Drenched, requiring cleanse). Preferred: Kaladin's Oath Guard. **Fallback:** Drenched is cleansable by any healing item or Kaladin's base Cleric heal; Submerged phase can be skipped by simply waiting it out — the Leviathan surfaces on its own after two turns.
 
 ### Wind Boss — Gale Archon (Cloudstep Peak)
-Casts Tailwind (permanent Haste on itself) and knocks a hero's ATB gauge to zero on hit. Preferred: Dylan's Veil Step dodges the reset and crits through its evasion aura. **Fallback:** Haste can be removed by any Slow-inflicting basic ability or item; the ATB reset is a one-turn setback, not a death sentence — the party simply acts in whatever order remains.
+Casts Tailwind (permanent Haste on itself) and knocks a hero's ATB gauge to zero on hit. Preferred: Dylan's Veil Step dodges the reset and crits through its evasion aura. **Fallback:** Haste can be removed by any Slow-inflicting basic ability or item; the ATB reset is a one-turn setback, not a death sentence — the party simply acts in whatever order remains. **Soft cap:** no hero's ATB gauge can be reduced below 10, so repeated Archon hits cannot fully brick a character's turn order.
+
+### IslandBoss.gd (core logic)
+
+```gdscript
+class_name IslandBoss extends Combatant
+
+enum BossType { CORE_WYRM, CINDER_SOVEREIGN, ABYSSAL_LEVIATHAN, GALE_ARCHON }
+@export var boss_type: BossType = BossType.CORE_WYRM
+@export var add_scene: PackedScene
+
+var turn_counter: int = 0
+var is_shelled: bool = false
+var is_submerged: bool = false
+
+signal boss_telegraph(message: String)
+signal drain_hero_atb(target: Combatant)
+
+func execute_boss_ai(party: Array[Combatant]) -> Dictionary:
+	turn_counter += 1
+	var living: Array[Combatant] = party.filter(func(h): return h.current_hp > 0)
+	if living.is_empty():
+		return {}
+	match boss_type:
+		BossType.CORE_WYRM:
+			return _ai_core_wyrm(living)
+		BossType.CINDER_SOVEREIGN:
+			return _ai_cinder_sovereign(living)
+		BossType.ABYSSAL_LEVIATHAN:
+			return _ai_abyssal_leviathan(living)
+		BossType.GALE_ARCHON:
+			return _ai_gale_archon(living)
+	return {}
+
+# 1. EARTH BOSS: Curls into Obsidian Shell every 3rd turn; Wind breaks it
+func _ai_core_wyrm(living: Array[Combatant]) -> Dictionary:
+	if is_shelled:
+		is_shelled = false
+		emit_signal("boss_telegraph", "Core-Scarred Wyrm unleashes Tectonic Slam!")
+		return { "type": "AOE_DAMAGE", "power": 45, "element": BattleTypes.Element.EARTH }
+	elif turn_counter % 3 == 0:
+		is_shelled = true
+		emit_signal("boss_telegraph", "Wyrm curls into an Obsidian Shell! (Physical resisted)")
+		return { "type": "BUFF_SELF" }
+	return { "type": "SINGLE_HIT", "target": living.pick_random(), "power": 30, "element": BattleTypes.Element.EARTH }
+
+# 2. FIRE BOSS: Summons Emberkin adds and buffs self (countered by Sarah's Arcane Steal)
+func _ai_cinder_sovereign(living: Array[Combatant]) -> Dictionary:
+	if turn_counter % 3 == 1 and add_scene:
+		var ember: Combatant = add_scene.instantiate()
+		get_parent().add_child(ember)
+		emit_signal("boss_telegraph", "Cinder Sovereign kindles an Emberkin!")
+		return { "type": "SUMMON" }
+	return { "type": "SINGLE_HIT", "target": living.pick_random(), "power": 34, "element": BattleTypes.Element.FIRE }
+
+# 3. WATER BOSS: Alternates Submerge (melee immune) and Tidal Surge (party Drenched)
+func _ai_abyssal_leviathan(living: Array[Combatant]) -> Dictionary:
+	if is_submerged:
+		is_submerged = false
+		emit_signal("boss_telegraph", "Leviathan breaches with Tidal Surge!")
+		return { "type": "AOE_STATUS", "power": 36, "element": BattleTypes.Element.WATER, "status": BattleTypes.StatusEffect.DRENCHED }
+	elif turn_counter % 2 == 0:
+		is_submerged = true
+		emit_signal("boss_telegraph", "Leviathan dives beneath the trench!")
+		return { "type": "SUBMERGE" }
+	return { "type": "SINGLE_HIT", "target": living.pick_random(), "power": 32, "element": BattleTypes.Element.WATER }
+
+# 4. WIND BOSS: Permanent Haste + Gale Knockback resets a hero's ATB to 0
+func _ai_gale_archon(living: Array[Combatant]) -> Dictionary:
+	if turn_counter == 1:
+		apply_status(BattleTypes.StatusEffect.HASTE, 999.0)
+	var target: Combatant = living.pick_random()
+	emit_signal("boss_telegraph", "Gale Archon blasts %s back!" % target.combatant_name)
+	emit_signal("drain_hero_atb", target)
+	return { "type": "SINGLE_HIT", "target": target, "power": 28, "element": BattleTypes.Element.WIND }
+
+func calculate_and_apply_damage(raw_power: int, element: BattleTypes.Element) -> Dictionary:
+	if is_shelled and element == BattleTypes.Element.WIND:
+		is_shelled = false
+		emit_signal("boss_telegraph", "Wind magic shattered the Obsidian Shell!")
+	elif is_shelled and element == BattleTypes.Element.NONE:
+		raw_power = int(raw_power * 0.25)
+	return super.calculate_and_apply_damage(raw_power, element)
+```
 
 ---
 
@@ -185,13 +268,85 @@ Casts Tailwind (permanent Haste on itself) and knocks a hero's ATB gauge to zero
 
 A relay across the floating islands: begin on Earth (slowest to die), touch the crystal to wake it and reveal the path to Fire (burns brightest when desperate), then Water, then Wind. Each crystal seals its island's spill and strengthens the party's pacts.
 
-**Final Battle: The Hollow King (3 Phases)** — deep in the abyss at the Core.
+**Final Battle: The Hollow King (3 Phases)** — deep in the abyss at the Core. Controlled by HollowKingEncounter.gd state machine.
 
 1. **Phase 1 — The Unmaking:** The King is completely immune to standard HP reduction (0 damage popups). Each party member must channel their Crystal Mark onto one of four floating Core Pedestals while surviving abyssal minion waves. Pedestals glow as each mark lands.
 2. **Phase 2 — Resonance Inversion:** Once all four pedestals glow, the King becomes vulnerable — but reverses Resonance rules: spending Resonance heals the King. The party fights with basic attacks, Mark commands, and items while Hollow Wings try to forcibly inject stolen Resonance into the boss.
 3. **Phase 3 — Wholeness:** At 25% HP, the King begins a 4-turn cast (Unravel Gaia). All four party members must reach 100% ATB and trigger a synchronized Quad-Resonance Seal simultaneously to press the four crystals back into the Core.
 
 The Hollow King cannot be killed by force — it isn't solid. Only pushed back by wholeness.
+
+### HollowKingEncounter.gd (core logic)
+
+```gdscript
+class_name HollowKingEncounter extends Node
+
+enum Phase { PHASE_1_PEDESTALS, PHASE_2_INVERSION, PHASE_3_WHOLENESS, VICTORY }
+var current_phase: Phase = Phase.PHASE_1_PEDESTALS
+
+# Tracks which crystal pedestals have been channeled: { Element: bool }
+var lit_pedestals: Dictionary = {
+	BattleTypes.Element.EARTH: false,
+	BattleTypes.Element.FIRE: false,
+	BattleTypes.Element.WATER: false,
+	BattleTypes.Element.WIND: false
+}
+
+var unravel_countdown: float = 20.0 # Seconds to align all 4 ATB bars in Phase 3
+@export var hollow_king: Combatant
+@export var party: Array[Combatant]
+
+signal phase_changed(new_phase: Phase)
+signal core_sealed_victory
+
+func channel_pedestal(element: BattleTypes.Element) -> void:
+	if current_phase != Phase.PHASE_1_PEDESTALS:
+		return
+	lit_pedestals[element] = true
+	if not lit_pedestals.values().has(false):
+		current_phase = Phase.PHASE_2_INVERSION
+		emit_signal("phase_changed", current_phase)
+
+func _process(delta: float) -> void:
+	if current_phase == Phase.PHASE_2_INVERSION and hollow_king.current_hp <= int(hollow_king.max_hp * 0.25):
+		current_phase = Phase.PHASE_3_WHOLENESS
+		emit_signal("phase_changed", current_phase)
+	if current_phase == Phase.PHASE_3_WHOLENESS:
+		unravel_countdown -= delta
+		_check_quad_resonance_alignment()
+
+func _check_quad_resonance_alignment() -> void:
+	for hero in party:
+		if hero.current_hp <= 0 or not hero.is_ready:
+			return
+	current_phase = Phase.VICTORY
+	emit_signal("core_sealed_victory")
+```
+
+---
+
+## Encounter Tables
+
+`EncounterTable.gd` is a Resource that dynamically injects unlocked abyss minions based on GameState.story_flags. Each region gets base_packs of enemy scene arrays; the roll function appends the highest-unlocked minion type.
+
+```gdscript
+class_name EncounterTable extends Resource
+
+@export var region_name: String = "Fire Bridge Abyss"
+@export var base_packs: Array[Array] = []
+
+func roll_encounter_pack() -> Array[PackedScene]:
+	var pack: Array[PackedScene] = base_packs.pick_random().duplicate()
+	if GameState.story_flags.get("wind_crystal_restored", false):
+		pack.append(preload("res://enemies/HollowWing.tscn"))
+	elif GameState.story_flags.get("water_crystal_restored", false):
+		pack.append(preload("res://enemies/Drowned.tscn"))
+	elif GameState.story_flags.get("fire_crystal_restored", false):
+		pack.append(preload("res://enemies/Ashwraith.tscn"))
+	elif GameState.story_flags.get("earth_crystal_restored", false):
+		pack.append(preload("res://enemies/Grimstone.tscn"))
+	return pack
+```
 
 ---
 
@@ -201,6 +356,7 @@ The Hollow King cannot be killed by force — it isn't solid. Only pushed back b
 - Real-time gauges governed by Speed stat. Gauge fills: `speed * delta * 2.5`. At 100, turn ready.
 - **Wait Mode:** global `BattleState.is_paused` freezes gauges in submenus.
 - Turn cycling: tab/shoulder swaps active character in ready queue.
+- **ATB Floor:** no hero's gauge can drop below 10 (Gale Archon soft cap).
 
 ### Resonance
 - Party-shared meter (0–100). Normal actions build +15. Resonance command costs full bar.
@@ -240,16 +396,41 @@ The Hollow King cannot be killed by force — it isn't solid. Only pushed back b
   - **Water:** Teals and deep navy with pearl white accents.
   - **Wind:** Sky blue and crisp white with silver highlights.
 - **Character Sprites:** 32x32 pixels with chunky 16-bit proportions and distinct, readable silhouettes.
+- **Boss Sprites:** 64x64 canvas for the four Island Bosses and the Hollow King.
 - **UI Style:** Clean pixel serif font in crisp white over classic royal blue (#001870) PanelContainer windows with 2px white borders. Nearest texture filter in project settings.
 
+### Aseprite Production Pipeline
+1. **Tilesets:** 16x16 grid; organize each island into a single 128x128 atlas (ground, walls, cliffs, props, animated_water_lava).
+2. **Characters & Monsters:** 32x32 canvas for party sprites and standard enemies; 64x64 for bosses.
+3. **Animation Frame Budget (minimum viable):**
+   - Overworld Heroes: 2-frame idle/walk cycle per direction (Down, Up, Side — flip for Left/Right) = 6 frames per character.
+   - Battle Heroes: Idle (2), Attack Lunge (1), Cast/Mark Glow (2, bright palette-swapped tattoo pixels), Hurt (1), KO (1) = 7 frames per character.
+4. Godot import: Default Texture Filter set to Nearest in Project Settings > Rendering > Textures.
+
 ### Music Direction
-- **Format:** 4-channel SNES-inspired chiptune.
-- **Dynamic Crystal Motif:** One core musical motif that layers in a new channel as each crystal is restored:
-  1. Earth: Low, steady bass pulse.
-  2. Fire: Adds a fast, driving arpeggio.
-  3. Water: Layers in a rising, lyrical melody.
-  4. Wind: Fullest four-channel harmonic arrangement.
-- **Hollow King Theme:** Uses the exact same four notes, inverted and slowed down — players physically hear the world healing as crystals return.
+- **Format:** 4-channel SNES-inspired chiptune. Compose in FamiStudio, DefleMask, or Furnace Tracker; export to .ogg loops at 120 BPM (World Theme) and 60 BPM (Hollow King Theme).
+- **Core Motif (4 notes):** D4 – F4 – A4 – E5 (D Dorian, hopeful yet ancient).
+- **Channel 1 — Earth (Triangle/Sub-Bass):** steady quarter-note root ostinato (D2 – D2 – C2 – A1).
+- **Channel 2 — Fire (25% Pulse Wave):** fast 16th-note broken chord arpeggios over the bass pulse.
+- **Channel 3 — Water (50% Pulse Wave):** slow half-note counter-melody (A4 – G4 – F4 – E4 – D4) with soft vibrato.
+- **Channel 4 — Wind (Noise + High Lead):** crisp hi-hat groove plus octave-doubled high melody (D5 – F5 – A5 – E6).
+- **Hollow King Inversion:** same four-note motif inverted downward (D4 – B3 – G3 – C3), halved tempo at 60 BPM, Channel 3 drenched in detuned reverb. Players physically hear the world healing as crystals return.
+- **MusicManager.gd:** four synchronized AudioStreamPlayers, all start at 0.0s to stay in phase. `start_world_theme()` plays all; `refresh_channel_volumes()` fades each channel from -80dB to 0dB over 1.5s when its crystal flag unlocks.
+
+---
+
+## Playtest Balance Pass: Resonance & CP Progression
+
+| Metric | Target Value | Design Rationale |
+|---|---|---|
+| Starting Resonance | 30 / 100 | Lets players cast one starter spell immediately without trivializing turn 1. |
+| Basic Attack Gain | +15 Resonance | 4–5 basic attacks across the party fills a full 100 bar for an ultimate. |
+| Elemental Weakness Hit | +30 Resonance (2x) | Rewards matching crystal elements; fills the bar in ~3 turns. |
+| Tier 1 Spell Cost | 20 Resonance | Sustainable every 1–2 turns in normal fights. |
+| Tier 2 / AoE Spell Cost | 40 Resonance | Requires intentional setup or weakness chaining. |
+| Resonance Ultimate Cost | 100 Resonance | Full-bar payoff; resets meter to 0 (triggering Overcast tension). |
+| CP per Trash Battle | 10 – 15 CP | Unlocks the first Job skill (30 CP) after 2–3 fights on Earth Island. |
+| CP per Island Boss | 100 CP | Guarantees a major tier unlock right as a new Leyline Bridge opens. |
 
 ---
 
@@ -260,6 +441,7 @@ The Hollow King cannot be killed by force — it isn't solid. Only pushed back b
 - `DialogueBox.gd` — typewriter CanvasLayer queue that freezes OverworldPlayer during conversations.
 - `BattleTypes.gd` — shared enums: Element (NONE/FIRE/WATER/WIND/EARTH), Affinity (WEAK/NEUTRAL/RESIST/ABSORB), StatusEffect (NONE/BURN/DRENCHED/HASTE/SLOW/PETRIFY).
 - `MusicManager.gd` — four synchronized AudioStreamPlayers (EarthBass, FireArp, WaterMelody, WindHarmony), all start at 0.0s to stay in phase. `start_world_theme()` plays all; `refresh_channel_volumes()` fades each channel from -80dB to 0dB over 1.5s when its crystal flag unlocks. Hollow King theme swaps in on inversion.
+- `SaveManager.gd` — save/load wrappers around ResourceSaver/ResourceLoader.
 
 ### Overworld Loop
 - `OverworldPlayer.gd` — 16x16 tweened grid movement with directional RayCast2D (InteractRay) calling on_interact() on TreasureChest and StoryNPC nodes.
@@ -271,30 +453,31 @@ The Hollow King cannot be killed by force — it isn't solid. Only pushed back b
 - `BattleManager.gd` — state machine (IDLE, SELECTING_TARGET, EXECUTING_ACTION) coordinating BattleUI, TargetCursor, enemy AI, DamagePopup feedback. Hooks Hollow Wing resonance drain and Ashwraith spawn triggers.
 - `Combatant.gd` — real-time ATB (speed * delta * 2.5), status timers, elemental damage multipliers, initialize_from_profile().
 - `AbyssMinion.gd` — extends Combatant with MinionTrait enum and signature mechanics (see Abyss Minions).
+- `IslandBoss.gd` — extends Combatant with BossType enum, telegraph signals, and per-boss AI (see Island Bosses).
+- `HollowKingEncounter.gd` — final battle phase state machine (see The Quest & Finale).
+- `EncounterTable.gd` — Resource-driven encounter packs with dynamic minion escalation (see Encounter Tables).
 - `BattleUI.gd` — ResonanceBar, CommandPanel, PartyStatusPanel, keyboard nav, advance_to_next_turn().
 - `DamagePopup.gd` — launch_elemental() with WEAK/RESIST/ABSORB visual tags.
 - `HeroProfile.gd` / `CrystalMarkData.gd` / `JobData.gd` / `AbilityData.gd` — modular .tres resources driving stats, affinities, CP progression, command menus.
 
 ### Save System & Title Screen
 - `SaveGameData.gd` (Resource): party_profiles, story_flags, opened_chests, inventory, current_scene, player_position. Serialized via ResourceSaver to user://save_slot_1.tres.
-- `SaveManager.gd`: save/load wrappers around ResourceSaver/ResourceLoader.
 - `TitleScreen.tscn`: dark abyss backdrop, four glowing crystal icons at cardinal points, pixel serif title CORE PROTECTORS, three keyboard buttons (New Game, Continue — auto-disabled if save file missing, Quit).
 
 ### Scene Transitions
-- Save current scene path + player coordinates to GameState before battle.
-- Restore position on victory return to overworld.
+- Save current scene path + player coordinates to GameState before battle; restore on victory return.
 
 ---
 
 ## Open Items
 
-- [ ] Full GDScript for island boss encounters (Core-Scarred Wyrm, Cinder Sovereign, Abyssal Leviathan, Gale Archon)
-- [ ] Final boss Core Pedestal state machine (Quad-Resonance Seal sync logic)
-- [ ] Hollow King minion spawn tables per abyss region
-- [ ] Chiptune track composition (four crystal layers + Hollow King inversion)
-- [ ] Pixel sprite production pipeline (32x32 characters, 16x16 tiles)
-- [ ] Playtest balance pass on resonance economy and CP progression
+1. Implement SaveManager.gd + TitleScreen.gd scripts (template).
+2. Build first Aseprite-to-Godot TileMapLayer scene for Rootfall.
+3. Write BattleManager hooks for Hollow Wing resonance drain and Ashwraith spawning.
+4. Prototype HollowKingEncounter phase transitions in a test scene.
+5. Compose the four-note core motif in FamiStudio and test channel layering.
+6. First playtest pass on Earth Island vertical slice: Rootfall → Deepcrag → Core-Scarred Wyrm.
 
 ---
 
-*Built with Ben Ryan & son. Godot 4 / GDScript. Inspired by FF4, FF5, Cosmere (Sanderson), WoW elemental systems.*
+*Last updated: 2026-11-13. Version 2.3 adds IslandBoss.gd, HollowKingEncounter.gd, EncounterTable.gd, chiptune composition specs, Aseprite pipeline, balance tables, and the Gale Archon ATB soft cap.*
