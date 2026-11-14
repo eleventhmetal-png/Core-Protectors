@@ -1,5 +1,5 @@
 # Core Protectors — Design Document
-**Version 2.1** | A 16-bit JRPG inspired by Final Fantasy IV/V, built in Godot 4
+**Version 2.2** | A 16-bit JRPG inspired by Final Fantasy IV/V, built in Godot 4
 
 ---
 
@@ -89,7 +89,7 @@ Separate from marks. Equipped outside combat. Stat multipliers + second command 
 
 ## Travel: Leyline Bridges
 
-No free flight or sailing. Each crystal reclaimed unlocks a **leyline bridge** — a shimmering path across the abyss, active only while that crystal's resonance holds. Earth → Fire → Water open in sequence. Wind's bridge is unstable until all four crystals are reclaimed.
+No free flight or sailing. Each crystal reclaimed unlocks a **leyline bridge** — a shimmering path across the abyss, active only while that crystal's resonance holds. Earth → Fire → Water open in sequence. Wind's bridge is unstable until all four crystals are reclaimed. See LeylineBridge.gd in Technical Architecture.
 
 ---
 
@@ -98,21 +98,100 @@ No free flight or sailing. Each crystal reclaimed unlocks a **leyline bridge** �
 - Town NPC dialogue shifts via StoryNPC flag system.
 - Monsters thin out on reclaimed islands.
 - New element-tied gear appears in shops.
-- Abyss encounters escalate with a new minion type per crystal:
-  - **Earth:** Grimstone — rock golems that regenerate unless broken fast.
-  - **Fire:** Ashwraiths — split into two weaker copies on death.
-  - **Water:** Drowned — bloated corpses that inflict Drenched on hit.
-  - **Wind:** Hollow Wing — bat-like, steals resonance instead of dealing damage.
+- Abyss encounters escalate with a new minion type per crystal (see Abyss Minions below).
 
 ---
 
-## The Quest
+## Abyss Minions
 
-Relay across islands. Start on earth (slowest to die). Touch the crystal, it wakes, points to the next. Fire (burns brightest when desperate), then water, then wind.
+Extend Combatant.gd with child script AbyssMinion.gd using an @export enum MinionTrait so any abyssal enemy triggers its signature mechanic automatically.
 
-Each crystal reclaimed: seals that island's spill + grants a new pact.
+| Minion | Unlock | HP | ATK/MAG | SPD | Affinities | Signature Mechanic |
+|---|---|---|---|---|---|---|
+| **Grimstone** | Earth Crystal | 380 | 32/10 | 9 | Weak: Wind. Resist: Earth, Fire | Stone Core Regen: heals 10% max HP every 3s unless hit by Wind (cracks core, disables regen 6s). |
+| **Ashwraith** | Fire Crystal | 240 | 18/36 | 16 | Weak: Water. Absorb: Fire | Mitosis: at 0 HP, spawns two Ash Sparks (110 HP, 18 MAG, 18 SPD) unless killed by Water. |
+| **Drowned** | Water Crystal | 310 | 28/22 | 12 | Weak: Fire, Earth. Absorb: Water | Brine Touch: every physical hit inflicts Drenched (8s), halving party Fire damage. |
+| **Hollow Wing** | Wind Crystal | 210 | 12/28 | 22 | Weak: Earth. Resist: Wind | Resonance Siphon: basic attack deals 0 HP damage, drains 20 from party Resonance meter. |
 
-**Final fight:** at the Core, down in the abyss. The Hollow King can't be killed by force — it isn't solid. Only pushed back by wholeness. The four crystals pressed back into the Core at the same moment, party holding them while Gaia heals.
+### AbyssMinion.gd (core logic)
+
+```gdscript
+class_name AbyssMinion extends Combatant
+
+enum Trait { NONE, GRIMSTONE_REGEN, ASHWRAITH_SPLIT, DROWNED_TOUCH, HOLLOW_SIPHON }
+@export var minion_trait: Trait = Trait.NONE
+@export var ash_spark_scene: PackedScene
+
+var _regen_timer: float = 0.0
+var _regen_suppressed_timer: float = 0.0
+var _last_hit_element: BattleTypes.Element = BattleTypes.Element.NONE
+
+func _process(delta: float) -> void:
+	super._process(delta)
+	if current_hp <= 0:
+		return
+	if minion_trait == Trait.GRIMSTONE_REGEN:
+		if _regen_suppressed_timer > 0.0:
+			_regen_suppressed_timer -= delta
+			return
+		_regen_timer += delta
+		if _regen_timer >= 3.0:
+			_regen_timer = 0.0
+			current_hp = min(max_hp, current_hp + int(max_hp * 0.10))
+
+func calculate_and_apply_damage(raw_power: int, element: BattleTypes.Element) -> Dictionary:
+	_last_hit_element = element
+	if minion_trait == Trait.GRIMSTONE_REGEN and element == BattleTypes.Element.WIND:
+		_regen_suppressed_timer = 6.0
+	var result: Dictionary = super.calculate_and_apply_damage(raw_power, element)
+	if current_hp <= 0 and minion_trait == Trait.ASHWRAITH_SPLIT and element != BattleTypes.Element.WATER:
+		_trigger_ash_split()
+	return result
+
+func _trigger_ash_split() -> void:
+	if ash_spark_scene == null:
+		return
+	for i in range(2):
+		var spark: Combatant = ash_spark_scene.instantiate()
+		get_parent().add_child(spark)
+		spark.position = position + Vector2(0, -24 if i == 0 else 24)
+```
+
+Drowned's Brine Touch hooks into Combatant's execute_action path: on any physical hit from a Drowned, call `target.apply_status(BattleTypes.StatusEffect.DRENCHED, 8.0)`.
+
+Hollow Wing's Resonance Siphon hooks into BattleManager: on Hollow Wing basic attack, skip HP damage and call `battle_ui.add_resonance(-20.0)`.
+
+---
+
+## Island Bosses
+
+Each island boss tests whether the player has mastered that island's element and the party's Mark commands. **Every boss has a non-Mark fallback** so a player missing an unlocked command is never stuck.
+
+### Earth Boss — The Core-Scarred Wyrm (Deepcrag Chasm)
+Curls into an **Obsidian Shell** periodically: halves physical damage and charges a party-wide quake. Preferred solution: Gardok's Stonebind to tank the quake, or Wind magic to break its posture. **Fallback:** any hero can simply step out of the quake's blast radius (telegraphed by screen shake) or use a basic-attack focus to break the shell's posture over two consecutive hits.
+
+### Fire Boss — Cinder Sovereign (Emberdeep Caldera)
+Summons two Emberkin wisps that buff its attack every turn. Preferred: Sarah's Arcane Steal strips the Flame Mantle; Water abilities extinguish wisps permanently. **Fallback:** any hero can destroy the wisps with two basic attacks each, or focus the Sovereign directly — wisps despawn when it hits 50% HP.
+
+### Water Boss — Abyssal Leviathan (Sunken Trench)
+Alternates **Submerged** (untargetable by melee; weak to Wind/Earth shockwaves) and **Tidal Surge** (party-wide Drenched, requiring cleanse). Preferred: Kaladin's Oath Guard. **Fallback:** Drenched is cleansable by any healing item or Kaladin's base Cleric heal; Submerged phase can be skipped by simply waiting it out — the Leviathan surfaces on its own after two turns.
+
+### Wind Boss — Gale Archon (Cloudstep Peak)
+Casts Tailwind (permanent Haste on itself) and knocks a hero's ATB gauge to zero on hit. Preferred: Dylan's Veil Step dodges the reset and crits through its evasion aura. **Fallback:** Haste can be removed by any Slow-inflicting basic ability or item; the ATB reset is a one-turn setback, not a death sentence — the party simply acts in whatever order remains.
+
+---
+
+## The Quest & Finale
+
+A relay across the floating islands: begin on Earth (slowest to die), touch the crystal to wake it and reveal the path to Fire (burns brightest when desperate), then Water, then Wind. Each crystal seals its island's spill and strengthens the party's pacts.
+
+**Final Battle: The Hollow King (3 Phases)** — deep in the abyss at the Core.
+
+1. **Phase 1 — The Unmaking:** The King is completely immune to standard HP reduction (0 damage popups). Each party member must channel their Crystal Mark onto one of four floating Core Pedestals while surviving abyssal minion waves. Pedestals glow as each mark lands.
+2. **Phase 2 — Resonance Inversion:** Once all four pedestals glow, the King becomes vulnerable — but reverses Resonance rules: spending Resonance heals the King. The party fights with basic attacks, Mark commands, and items while Hollow Wings try to forcibly inject stolen Resonance into the boss.
+3. **Phase 3 — Wholeness:** At 25% HP, the King begins a 4-turn cast (Unravel Gaia). All four party members must reach 100% ATB and trigger a synchronized Quad-Resonance Seal simultaneously to press the four crystals back into the Core.
+
+The Hollow King cannot be killed by force — it isn't solid. Only pushed back by wholeness.
 
 ---
 
@@ -180,18 +259,26 @@ Each crystal reclaimed: seals that island's spill + grants a new pact.
 - `GameState.gd` — party_profiles, story_flags, opened_chests, inventory, last_overworld_scene, last_player_position.
 - `DialogueBox.gd` — typewriter CanvasLayer queue that freezes OverworldPlayer during conversations.
 - `BattleTypes.gd` — shared enums: Element (NONE/FIRE/WATER/WIND/EARTH), Affinity (WEAK/NEUTRAL/RESIST/ABSORB), StatusEffect (NONE/BURN/DRENCHED/HASTE/SLOW/PETRIFY).
+- `MusicManager.gd` — four synchronized AudioStreamPlayers (EarthBass, FireArp, WaterMelody, WindHarmony), all start at 0.0s to stay in phase. `start_world_theme()` plays all; `refresh_channel_volumes()` fades each channel from -80dB to 0dB over 1.5s when its crystal flag unlocks. Hollow King theme swaps in on inversion.
 
 ### Overworld Loop
 - `OverworldPlayer.gd` — 16x16 tweened grid movement with directional RayCast2D (InteractRay) calling on_interact() on TreasureChest and StoryNPC nodes.
 - `TreasureChest.gd` — persistent via GameState.opened_chests, swaps closed/open texture.
 - `StoryNPC.gd` — flag-reactive dialogue, optional flag-setting on talk.
+- `LeylineBridge.gd` — Area2D + TileMapLayer gate. @export required_flags array and target_island_scene. Bridge visuals and monitoring toggle on flag check. On body_entered (OverworldPlayer): save spawn position to GameState, change_scene_to_file target island.
 
 ### Battle Loop (BattleScene.tscn)
-- `BattleManager.gd` — state machine (IDLE, SELECTING_TARGET, EXECUTING_ACTION) coordinating BattleUI, TargetCursor, enemy AI, DamagePopup feedback.
+- `BattleManager.gd` — state machine (IDLE, SELECTING_TARGET, EXECUTING_ACTION) coordinating BattleUI, TargetCursor, enemy AI, DamagePopup feedback. Hooks Hollow Wing resonance drain and Ashwraith spawn triggers.
 - `Combatant.gd` — real-time ATB (speed * delta * 2.5), status timers, elemental damage multipliers, initialize_from_profile().
+- `AbyssMinion.gd` — extends Combatant with MinionTrait enum and signature mechanics (see Abyss Minions).
 - `BattleUI.gd` — ResonanceBar, CommandPanel, PartyStatusPanel, keyboard nav, advance_to_next_turn().
 - `DamagePopup.gd` — launch_elemental() with WEAK/RESIST/ABSORB visual tags.
 - `HeroProfile.gd` / `CrystalMarkData.gd` / `JobData.gd` / `AbilityData.gd` — modular .tres resources driving stats, affinities, CP progression, command menus.
+
+### Save System & Title Screen
+- `SaveGameData.gd` (Resource): party_profiles, story_flags, opened_chests, inventory, current_scene, player_position. Serialized via ResourceSaver to user://save_slot_1.tres.
+- `SaveManager.gd`: save/load wrappers around ResourceSaver/ResourceLoader.
+- `TitleScreen.tscn`: dark abyss backdrop, four glowing crystal icons at cardinal points, pixel serif title CORE PROTECTORS, three keyboard buttons (New Game, Continue — auto-disabled if save file missing, Quit).
 
 ### Scene Transitions
 - Save current scene path + player coordinates to GameState before battle.
@@ -201,13 +288,12 @@ Each crystal reclaimed: seals that island's spill + grants a new pact.
 
 ## Open Items
 
-- [ ] Boss designs per island
-- [ ] Final boss choreography (Hollow King)
-- [ ] Save system
-- [ ] Title screen
-- [ ] Hollow King minion scripts (Grimstone regen, Ashwraith split, Hollow Wing resonance theft)
-- [ ] 4-channel dynamic music & leyline bridge controller
-- [ ] Abyss minion full stat blocks
+- [ ] Full GDScript for island boss encounters (Core-Scarred Wyrm, Cinder Sovereign, Abyssal Leviathan, Gale Archon)
+- [ ] Final boss Core Pedestal state machine (Quad-Resonance Seal sync logic)
+- [ ] Hollow King minion spawn tables per abyss region
+- [ ] Chiptune track composition (four crystal layers + Hollow King inversion)
+- [ ] Pixel sprite production pipeline (32x32 characters, 16x16 tiles)
+- [ ] Playtest balance pass on resonance economy and CP progression
 
 ---
 
