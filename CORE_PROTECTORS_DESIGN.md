@@ -1,5 +1,5 @@
 # Core Protectors — Design Document
-**Version 2.0** | A 16-bit JRPG inspired by Final Fantasy IV/V, built in Godot 4
+**Version 2.1** | A 16-bit JRPG inspired by Final Fantasy IV/V, built in Godot 4
 
 ---
 
@@ -50,23 +50,40 @@ Separate from marks. Equipped outside combat. Stat multipliers + second command 
 - **Town 1: Rootfall** — biggest stable chunk of earth crystal's island. Inn: cave with fire that never goes out. Shop: general goods. Priest: standard.
 - **Town 2: Deepcrag** — dwarf settlement carved into a cliff face, reachable only through mine tunnels. Dwarf elder felt the Core crack in his bones. Inn: longhall with massive hearth. Shop: forge, stone-forged gear only. Priest: dwarf geomancer mapping cracks on a living stone table.
 - **Crystal location:** learned from the dwarf elder.
+- **Side Quests:**
+  1. Escort a Rock Biter caravan through a cracked tunnel.
+  2. Rescue dwarves trapped in a cave-in.
+  3. Find the dwarf elder's lost hammer.
 
 ### Fire Island — Cinderreach
 - **Races:** Ashborn (humans scarred by the crystal's fall, don't fear heat) and Emberkin (small flame spirits, like Cosmere spren made of living fire; bind to Ashborn as living spells).
 - **Town 1: Ashhollow** — inside the hollow of a dead volcano. Inn: lava tube, beds carved in warm rock. Shop: flame-tongued blades, cindermail. Priest: blind Ashborn woman who reads heat instead of seeing.
 - **Town 2: Emberdeep** — on the lip of an active vent. The inn IS the fire; you sleep in pockets of cool air. Gear: lighter, faster, hit-and-run.
+- **Side Quests:**
+  1. Help an Ashborn child find her family in the ash plains.
+  2. Bind a runaway Emberkin before it burns down Emberdeep.
+  3. Deliver a sealed ember to Emberdeep's priest before it cools.
+  4. Hunt down an Ashwraith that's been mimicking villagers.
 
 ### Water Island — Tidecall
 - **Races:** Tidalfolk (amphibious humans with gills, farm kelp forests) and Deepkin (whale-sized leviathans, elders of the abyss, surface only to speak).
 - **Town 1: Saltmere** — stilts above shifting tides. Inn: flipped ship hull, beds from rafters. Shop: coral blades, pearl armor that hardens when wet. Priest: pours seawater over your mark — stings, but resonance returns faster.
 - **Town 2: Leviathan's Rest** — natural grotto where Deepkin beach themselves. Carved stone ledges, rope bridges. Heavy, slow gear that hits like a falling anchor.
 - **Town 3: Kelpmarket** — Tidalfolk trading post inside a sunken shipwreck. Deepkin come to barter.
+- **Side Quests:**
+  1. Recover a Deepkin elder's lost tooth from a Drowned nest.
+  2. Translate a kelp-scroll that hints at the Core's original shape.
+  3. Mediate a trade dispute between Tidalfolk and a Deepkin that could turn violent.
 
 ### Wind Island — Skyreach (last, hardest)
 - **Races:** Zephyri (tall, hollow bones, never touch ground) and Stormwrens (giant birds, riders double as mount and weapon platform).
 - **Town 1: Galehaven** — rope bridges and hanging platforms between three peaks. Inn: nest of woven branches. Shop: wind-cut daggers, glider cloaks. Priest: reads the wind, tells you which way Hollow King influence moves.
 - **Town 2: Rookery** — breeding grounds. Loud, chaotic, screeching. Best aerial gear and mounts.
 - **Town 3: Cloudstep** — highest peak. Stormwrens refuse to land; air too thin. Only place to see all four other islands at once.
+- **Side Quests:**
+  1. Race a Stormwren against a Zephyri rival to prove Dylan's worth.
+  2. Find a missing hatchling before a Hollow Wing gets it.
+  3. Quiet a wind spirit that's been screaming prophecy nobody understands.
 
 ---
 
@@ -135,15 +152,61 @@ Each crystal reclaimed: seals that island's spill + grants a new pact.
 
 ---
 
+## Visual & Audio Direction
+
+### Pixel Art Style Guide
+- **Tile Grid:** 16x16 pixel tiles with strict per-island color palettes:
+  - **Earth:** Browns and grays with one gold accent for crystal glow.
+  - **Fire:** Deep reds and charcoal with bright orange highlights.
+  - **Water:** Teals and deep navy with pearl white accents.
+  - **Wind:** Sky blue and crisp white with silver highlights.
+- **Character Sprites:** 32x32 pixels with chunky 16-bit proportions and distinct, readable silhouettes.
+- **UI Style:** Clean pixel serif font in crisp white over classic royal blue (#001870) PanelContainer windows with 2px white borders. Nearest texture filter in project settings.
+
+### Music Direction
+- **Format:** 4-channel SNES-inspired chiptune.
+- **Dynamic Crystal Motif:** One core musical motif that layers in a new channel as each crystal is restored:
+  1. Earth: Low, steady bass pulse.
+  2. Fire: Adds a fast, driving arpeggio.
+  3. Water: Layers in a rising, lyrical melody.
+  4. Wind: Fullest four-channel harmonic arrangement.
+- **Hollow King Theme:** Uses the exact same four notes, inverted and slowed down — players physically hear the world healing as crystals return.
+
+---
+
+## Technical Architecture (Godot 4)
+
+### Global Autoloads
+- `GameState.gd` — party_profiles, story_flags, opened_chests, inventory, last_overworld_scene, last_player_position.
+- `DialogueBox.gd` — typewriter CanvasLayer queue that freezes OverworldPlayer during conversations.
+- `BattleTypes.gd` — shared enums: Element (NONE/FIRE/WATER/WIND/EARTH), Affinity (WEAK/NEUTRAL/RESIST/ABSORB), StatusEffect (NONE/BURN/DRENCHED/HASTE/SLOW/PETRIFY).
+
+### Overworld Loop
+- `OverworldPlayer.gd` — 16x16 tweened grid movement with directional RayCast2D (InteractRay) calling on_interact() on TreasureChest and StoryNPC nodes.
+- `TreasureChest.gd` — persistent via GameState.opened_chests, swaps closed/open texture.
+- `StoryNPC.gd` — flag-reactive dialogue, optional flag-setting on talk.
+
+### Battle Loop (BattleScene.tscn)
+- `BattleManager.gd` — state machine (IDLE, SELECTING_TARGET, EXECUTING_ACTION) coordinating BattleUI, TargetCursor, enemy AI, DamagePopup feedback.
+- `Combatant.gd` — real-time ATB (speed * delta * 2.5), status timers, elemental damage multipliers, initialize_from_profile().
+- `BattleUI.gd` — ResonanceBar, CommandPanel, PartyStatusPanel, keyboard nav, advance_to_next_turn().
+- `DamagePopup.gd` — launch_elemental() with WEAK/RESIST/ABSORB visual tags.
+- `HeroProfile.gd` / `CrystalMarkData.gd` / `JobData.gd` / `AbilityData.gd` — modular .tres resources driving stats, affinities, CP progression, command menus.
+
+### Scene Transitions
+- Save current scene path + player coordinates to GameState before battle.
+- Restore position on victory return to overworld.
+
+---
+
 ## Open Items
 
 - [ ] Boss designs per island
 - [ ] Final boss choreography (Hollow King)
 - [ ] Save system
 - [ ] Title screen
-- [ ] Pixel art style guide (16x16 tiles, sprite specs)
-- [ ] Chiptune audio direction
-- [ ] Second earth town details beyond Deepcrag
+- [ ] Hollow King minion scripts (Grimstone regen, Ashwraith split, Hollow Wing resonance theft)
+- [ ] 4-channel dynamic music & leyline bridge controller
 - [ ] Abyss minion full stat blocks
 
 ---
